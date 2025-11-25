@@ -10,6 +10,7 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset
 import pandas as pd
+import numpy as np
 # Import models
 from models.mlp import ResidualMLP
 from models.physics import Fossen3DOF  # physics-based model
@@ -49,6 +50,44 @@ measured_accel = torch.tensor(df[target_cols].values, dtype=torch.float32)
 print("Inputs shape:", inputs.shape)            # (N, 5)
 print("Measured accel shape:", measured_accel.shape)  # (N, 3)
 
+# -------------------- AUTOCORRELATION ANALYSIS --------------------
+# Compute residuals from physics model to check if they're temporal
+print("\n--- Analyzing Residual Temporal Structure ---")
+fossen_model = Fossen3DOF()
+u, v, r, tL, tR = inputs.T
+with torch.no_grad():
+    physics_accel = fossen_model.forward(u, v, r, tL, tR)
+    residuals = measured_accel - physics_accel
+
+# Convert to numpy for autocorrelation analysis
+residuals_np = residuals.numpy()
+acc_labels = ["u_dot (surge)", "v_dot (sway)", "r_dot (yaw rate)"]
+
+print("\nResidual Statistics:")
+for i, label in enumerate(acc_labels):
+    residual_mag = np.mean(np.abs(residuals_np[:, i]))
+    measured_mag = np.mean(np.abs(measured_accel[:, i].numpy()))
+    ratio = residual_mag / measured_mag if measured_mag > 0 else 0
+    print(f"  {label}: Mean |residual|={residual_mag:.6f}, Mean |measured|={measured_mag:.6f}, Ratio={ratio:.4f}")
+
+print("\nAutocorrelation Analysis (lag 1-5):")
+print("  (High autocorrelation > 0.3 suggests temporal dependencies)")
+for i, label in enumerate(acc_labels):
+    residual_series = residuals_np[:, i]
+    autocorrs = []
+    for lag in range(1, 6):
+        if len(residual_series) > lag:
+            corr = np.corrcoef(residual_series[:-lag], residual_series[lag:])[0, 1]
+            autocorrs.append(corr)
+        else:
+            autocorrs.append(0.0)
+    
+    max_autocorr = max(autocorrs) if autocorrs else 0.0
+    temporal_indicator = "✓ TEMPORAL" if max_autocorr > 0.3 else "✗ State-dependent"
+    print(f"  {label}:")
+    print(f"    Lag 1-5 autocorr: {[f'{c:.4f}' for c in autocorrs]}")
+    print(f"    Max autocorr: {max_autocorr:.4f} {temporal_indicator}")
+
 dataset = TensorDataset(inputs, measured_accel)
 loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
 
@@ -57,7 +96,7 @@ model = ResidualMLP(in_dim=in_dim, hidden=hidden, out_dim=out_dim)
 criterion = nn.MSELoss()
 optimizer = optim.Adam(model.parameters(), lr=lr)
 
-fossen_model = Fossen3DOF()
+# fossen_model already created above for autocorrelation analysis
 
 # --------------------
 # print("\n🔍 Running dry run (single batch check)...")
